@@ -1,0 +1,169 @@
+---
+title: "pre-analysis-plan-declare-design"
+author: "Katie Worrall"
+date: '2022-05-13'
+output: pdf_document
+mainfont: Helvetica
+fontsize: 11pt
+geometry: margin=1in
+---
+
+```{r, set up}
+library(DeclareDesign)
+library(RItools)
+library(estimatr)
+library(senstrat)
+library(optmatch)
+library(tidyverse)
+library(coin)
+library(doRNG)
+```
+
+
+```{r echo=TRUE, results='asis'}
+
+N <- 36235
+protestID <- c(1:N)
+county <- sample(1:100, N, replace = T)
+voter <- rnorm(N, mean = 45, sd = 15)
+treat <- rbinom(N, 1, prob = 0.5)
+gender <- rnorm(N, mean = 50, sd = 1)
+crime <- rnorm(N, mean = 10, sd = 1)
+polidea <- sample(1:5, N, replace = T) #1- far left, 
+#2- left, 3 - center, 4- right, 5 - far right
+propsize <- rnorm(N, mean = 5, sd = 2)
+wrkdat <- cbind(protestID, voter, treat, gender, 
+                crime, polidea, propsize, county)
+head(wrkdat) #awesome
+class(wrkdat) #make data frame
+wrkdat <- as.data.frame(wrkdat)
+class(wrkdat) #perfect
+dim(wrkdat)
+#fake matching 
+#psMod <- brglm(treat ~ voter + gender + 
+#crime + polidea + propsize,
+  #data = wrkdat)
+#psDist <- match_on(psMod, within = exactMatch(treat ~ polidea), 
+#data = wrkdat)
+#fm1 <- fullmatch(psDist,
+ # min.controls = .2,
+ # omit.fraction = -.1,
+  #data = wrkdat#didn't run on my computer
+```
+
+
+```{r, DeclareDesign with matching, echo=TRUE, results='asis'}
+#I am commenting this all out because it didn't work, 
+#although it should have if I could have gotten Matching 
+#installed in my computer.
+#thepop <- declare_model(wrkdat)
+#potential_outcomes <- declare_potential_outcomes(Y ~ 
+#gender + crime + polidea + propsize + Z) 
+#potential_outcomes(wrkdat)
+#theassignment <- declare_assignment(handler = function(data) 
+#{prob <- with(wrkdat, pnorm(gender + crime + polidea + 
+#propsize + treat))data$Z <- rbinom(nrow(wrkdat), 1, 
+#prob)return(data)})
+#estimand <- declare_inquiry(ATE = mean(Y_Z_1 - Y_Z_0))
+#revealY <- declare_reveal(Y, Z)
+#install.packages("Matching")
+#library(Matching)
+#match_est <-function(data) {
+#match_out <- with(wrkdat, Matching(Y = Y,
+#Tr = Z,X = cbind(gender, crime, polidea, propsize)))
+#return(data.frame(term = "Z", estimate = match_out$est))}
+#est1 <- declare_estimator(handler = tidy_estimator(match_est),
+#estimand = estimand,
+#label = "matching")
+#design <- thepop + potential_outcomes + theassignment
+# + revealY +estimand + est1
+#fakedat <- draw_data(design)
+#match_mydiag <- declare_diagnosands(bias = 
+#mean(estimate - estimand),
+    #rmse = sqrt(mean((estimate - estimand) ^ 2)),
+         #power = mean(p.value < 0.05),
+  #mean_estimate = mean(estimate))
+#matchdiag <- diagnose_design(design, diagnosands = match_mydiag)
+#matchdiag
+```
+
+
+```{r, DeclareDesign without matching, echo=TRUE, results='asis'}
+set.seed(050132022)
+thepop2 <- declare_model(wrkdat)
+potential_outcomes2 <- declare_potential_outcomes(Y ~ voter) 
+theassignment2 <- declare_assignment(Z= complete_ra(N=N, prob=0.5))
+revealY2 <- declare_reveal(Y, Z)
+estimand2 <- declare_inquiry(ATE = mean(Y_Z_1 - Y_Z_0))
+est2 <- declare_estimator(Y~Z+gender + crime + polidea + 
+                            propsize, model = lm_robust, 
+                          se_type = "classical", 
+                          label = "lm_robust", inquiry = "ATE")
+
+wilcox_test_clt <- function(data){
+res <- wilcox_test(Y~as.factor(Z),data=data,
+                   distribution = c("asymptotic"))
+       data.frame(statistic = statistic(res)[[1]], 
+                  p.value = pvalue(res)[[1]])
+}
+test1 <- declare_test(handler=label_test(wilcox_test_clt),
+                      label="wilcox CLT test")
+newexperiment <- function(z, b) {
+  ## A function to randomly assign treatment within pair
+##z = treatment assignment that is completely randomly assigned within block
+##b = a block indicator
+  ## one method unsplit(lapply(split(z, b), sample), b)
+  ## Another method uses the randomizr package to randomly
+  ## assign treatment within each block (here, a block is a pair of cities)
+  randomizr::block_ra(blocks = b, m = 1)
+}
+errratefn <- function(simulations, trt, outcome, block) {
+  outpaired <- outcome - ave(outcome, block)
+  output <- foreach(1:simulations,
+    .export = c("newexperiment"),
+    .combine = "c") %dorng% {
+    
+    newz <- newexperiment(z = trt, b = block)
+    newzpaired <- newz - ave(newz, block)
+    sim_p <- summary(lm(outpaired ~ newzpaired))$coefficients[2, 4]
+    return(sim_p)
+  }
+  return(output)
+}
+results <- errratefn(100, trt = wrkdat$treat, outcome = wrkdat$voter, block = wrkdat$county)
+summary(results)
+mean(results < 0.05)
+design2 <- thepop2 + potential_outcomes2 + 
+  theassignment2 + revealY2 + 
+  estimand2 + test1 + est2
+mydiag2 <- declare_diagnosands(bias = 
+            mean(estimate - estimand),
+             rmse = sqrt(mean((estimate - estimand) ^ 2)),
+             power = mean(p.value < 0.05),
+            mean_estimate = mean(estimate))
+diag2 <- diagnose_design(design2, diagnosands = mydiag2)
+print(diag2)
+#As far as I can tell, I have done everything I can from 
+#looking through Declare Design, the supplementary materials 
+#from Blair et al. paper, the explorations, and I cannot get 
+#DeclareDesign to work. I am at a loss at this point. I have 
+#tried many different ways, and along the way did not save my 
+#work. I got it to work at some points, 
+#but then started over again, and now it will not work.
+```
+
+```{r, boxplot, echo=TRUE, results='asis'}
+library(ggplot2)
+bp <- ggplot(wrkdat, aes(group = county, 
+                         x = treat, y = voter)) +
+  geom_point() +
+  geom_boxplot() +
+  stat_summary(fun = mean, geom = "point", 
+                shape = 20, size = 3, 
+               color = "purple", fill = "purple") +
+  labs(title = "Police Surveillance Effects on Voter Turnout", 
+       x = "Police Surveillance at Protest", 
+       y = "Voter Turnout in 2022 Election")
+print(bp)
+```
+
